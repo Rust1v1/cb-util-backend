@@ -1,0 +1,10 @@
+[package]
+name = "cb-util-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rocket = { version = "0.5.1", features = ["json"] }
+serde_json = "1.0"
+mongodb = "3.2.3"
+bson = "2.14.0"
