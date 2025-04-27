@@ -1,7 +1,10 @@
-#[macro_use] extern crate rocket;
-use rocket::tokio::time::{sleep, Duration};
+#[macro_use]
+extern crate rocket;
+use futures::stream::TryStreamExt;
+use mongodb::bson::doc;
+use rocket::http::Status;
 use rocket::serde::{Deserialize, Serialize, json::Json};
-use mongodb::{ bson::doc, options::{ ClientOptions, ServerApi, ServerApiVersion }, Client };
+use rocket_db_pools::{Connection, Database, mongodb};
 
 #[derive(Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
@@ -30,76 +33,254 @@ enum StreamerState {
 #[derive(Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
 struct StreamerUpdateMessage {
-    profile_status: String
+    profile_status: StreamerState,
 }
 
+#[derive(Database)]
+#[database("mongo")]
+struct StreamersDB(mongodb::Client);
+
 #[get("/users")]
-async fn retrieve_users() -> Result<Json<Vec<Streamer>>, rocket::response::status::Custom<String>> {
-    sleep(Duration::from_secs(1)).await;
-    let streamer1 = Streamer {
-        profile_url: String::from("https://chaturbate.com/ehotlovea"),
-        profile_name: String::from("ehotlovea"),
-        profile_status: StreamerState::Added,
-        download_size_mb: 0,
+async fn retrieve_users(
+    db: Connection<StreamersDB>,
+) -> Result<Json<Vec<Streamer>>, rocket::response::status::Custom<String>> {
+    let streamer_cursor = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .find(None, None)
+        .await;
+    match streamer_cursor {
+        Ok(cursor) => {
+            if let Ok(streamers) = cursor.try_collect().await {
+                return Ok(Json(streamers));
+            } else {
+                return Err(rocket::response::status::Custom(
+                    Status::InternalServerError,
+                    String::from("Could Not Group Streamers From Database"),
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
     };
-    let streamer2 = Streamer {
-        profile_url: String::from("https://chaturbate.com/brooklyn_white"),
-        profile_name: String::from("brooklyn_white"),
-        profile_status: StreamerState::Added,
-        download_size_mb: 0,
-    };
-    let streamers = vec![streamer1, streamer2];
-    Ok(Json(streamers))
 }
 
 #[get("/users/<user>")]
-async fn retrieve_user(user: &str) -> Result<Json<Streamer>, rocket::response::status::Custom<String>> {
-    sleep(Duration::from_secs(1)).await;
-    Ok(Json(Streamer {
-        profile_url: format!("https://chaturbate.com/{}", user),
-        profile_name: String::from(user),
-        profile_status: StreamerState::Stopped,
-        download_size_mb: 0,
-    }))
+async fn retrieve_user(
+    db: Connection<StreamersDB>,
+    user: &str,
+) -> Result<Json<Streamer>, rocket::response::status::Custom<String>> {
+    let user_option = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .find_one(
+            doc! {
+                "profile_name": user
+            },
+            None,
+        )
+        .await;
+    match user_option {
+        Ok(opt) => {
+            if let Some(streamer) = opt {
+                println!("Found User {}", user);
+                return Ok(Json(streamer));
+            } else {
+                let err_string = format!("User: {} is not being tracked", user);
+                return Err(rocket::response::status::Custom(
+                    Status::NotFound,
+                    err_string,
+                ));
+            }
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
+    };
 }
 
 #[put("/users/<user>")]
-async fn add_user(user: &str) -> Result<Json<String>, rocket::response::status::BadRequest<String>> {
-    println!("Adding New User: {}", user);
-    Ok(Json(String::from("SUCCESS")))
+async fn add_user(
+    db: Connection<StreamersDB>,
+    user: &str,
+) -> Result<Json<StreamerState>, rocket::response::status::Custom<String>> {
+    if let Ok(user_count) = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .count_documents(
+            doc! {
+                "profile_name": user
+            },
+            None,
+        )
+        .await
+    {
+        if user_count > 0 {
+            let err_string = format!("User: {} already exists!", user);
+            return Err(rocket::response::status::Custom(
+                Status::Conflict,
+                err_string,
+            ));
+        } else {
+            println!("Adding New User: {}", user);
+        }
+    } else {
+        return Err(rocket::response::status::Custom(
+            Status::InternalServerError,
+            String::from("Could Not Retrieve Streamer Info"),
+        ));
+    }
+
+    let new_user = Streamer {
+        profile_url: format!("https://chaturbate.com/{}", user),
+        profile_name: String::from(user),
+        profile_status: StreamerState::Active,
+        download_size_mb: 0,
+    };
+    if let Ok(_res) = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .insert_one(&new_user, None)
+        .await
+    {
+        Ok(Json(StreamerState::Active))
+    } else {
+        let err_string = format!("Could Not Add User {}", user);
+        Err(rocket::response::status::Custom(
+            Status::InternalServerError,
+            err_string,
+        ))
+    }
 }
 
 #[delete("/users/<user>")]
-async fn delete_user(user: &str) -> Result<Json<String>, rocket::response::status::BadRequest<String>> {
-    println!("Deleting User: {}", user);
-    Ok(Json(String::from("SUCCESS")))
+async fn delete_user(
+    db: Connection<StreamersDB>,
+    user: &str,
+) -> Result<Json<String>, rocket::response::status::Custom<String>> {
+    match (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .count_documents(
+            doc! {
+                "profile_name": user
+            },
+            None,
+        )
+        .await
+    {
+        Ok(count) => {
+            if count != 1 {
+                return Err(rocket::response::status::Custom(
+                    Status::NotFound,
+                    format!("User {} does not exist to be deleted.", user),
+                ));
+            }
+            if let Err(delete_err) = (&*db)
+                .database("cbutil")
+                .collection::<Streamer>("streamers")
+                .delete_one(doc! {"profile_name": user}, None)
+                .await
+            {
+                return Err(rocket::response::status::Custom(
+                    Status::InternalServerError,
+                    delete_err.to_string(),
+                ));
+            } else {
+                println!("Deleting User: {}", user);
+                return Ok(Json(format!("Deleted {}", user)));
+            }
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
+    };
 }
 
 #[post("/users/<user>", data = "<msg>")]
-async fn mutate_user(user: &str, msg: Json<StreamerUpdateMessage> ) -> Result<Json<String>, rocket::response::status::BadRequest<String>> {
+async fn mutate_user(
+    db: Connection<StreamersDB>,
+    user: &str,
+    msg: Json<StreamerUpdateMessage>,
+) -> Result<Json<String>, rocket::response::status::Custom<String>> {
     let update = msg.into_inner();
-    println!("Updating User: {} to {}", user, update.profile_status);
-
-    Ok(Json(String::from("SUCCESS")))
+    let updated_user = Streamer {
+        profile_url: format!("https://chaturbate.com/{}", user),
+        profile_name: String::from(user),
+        profile_status: update.profile_status.clone(),
+        download_size_mb: 0,
+    };
+    match (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .count_documents(
+            doc! {
+                "profile_name": user
+            },
+            None,
+        )
+        .await
+    {
+        Ok(count) => {
+            if count != 1 {
+                return Err(rocket::response::status::Custom(
+                    Status::NotFound,
+                    format!("User {} does not exist to be updated.", user),
+                ));
+            }
+            if let Err(update_err) = (&*db)
+                .database("cbutil")
+                .collection::<Streamer>("streamers")
+                .replace_one(doc! {"profile_name": user}, updated_user, None)
+                .await
+            {
+                return Err(rocket::response::status::Custom(
+                    Status::InternalServerError,
+                    update_err.to_string(),
+                ));
+            } else {
+                println!("Updating User: {} to {:?}", user, update.profile_status);
+                return Ok(Json(format!(
+                    "Updated {} to {:?}",
+                    user, update.profile_status
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
+    };
 }
 
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
-
-    let uri = "mongodb://127.0.0.1:39239";
-    let mut client_options = ClientOptions::parse(uri).await.unwrap();
-    // Set the server_api field of the client_options object to Stable API version 1
-    let server_api = ServerApi::builder().version(ServerApiVersion::V1).build();
-    client_options.server_api = Some(server_api);
-    // Create a new client and connect to the server
-    let client = Client::with_options(client_options).unwrap();
-    // Send a ping to confirm a successful connection
-    client.database("admin").run_command(doc! { "ping": 1 }).await.unwrap();
-    println!("Pinged your deployment. You successfully connected to MongoDB!");
-
     let _rocket = rocket::build()
-        .mount("/", routes![retrieve_users, retrieve_user, add_user, delete_user, mutate_user])
-        .launch().await?;
+        .attach(StreamersDB::init())
+        .mount(
+            "/",
+            routes![
+                retrieve_users,
+                retrieve_user,
+                add_user,
+                delete_user,
+                mutate_user
+            ],
+        )
+        .launch()
+        .await?;
     Ok(())
 }
 
@@ -123,7 +304,13 @@ mod api_tests {
         };
         let stopped_json: String = serde_json::to_string(&streamer_stopped).unwrap();
         let error_json: String = serde_json::to_string(&streamer_error).unwrap();
-        assert_eq!(r#"{"profile_url":"https://chaturbate.com/ehotlovea","profile_name":"ehotlovea","profile_status":"stopped","download_size_mb":0}"#, stopped_json);
-        assert_eq!(r#"{"profile_url":"https://chaturbate.com/killpretty","profile_name":"killpretty","profile_status":{"error":100},"download_size_mb":0}"#, error_json);
+        assert_eq!(
+            r#"{"profile_url":"https://chaturbate.com/ehotlovea","profile_name":"ehotlovea","profile_status":"stopped","download_size_mb":0}"#,
+            stopped_json
+        );
+        assert_eq!(
+            r#"{"profile_url":"https://chaturbate.com/killpretty","profile_name":"killpretty","profile_status":{"error":100},"download_size_mb":0}"#,
+            error_json
+        );
     }
 }
