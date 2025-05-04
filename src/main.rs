@@ -20,8 +20,8 @@ struct Streamer {
 enum StreamerState {
     #[serde(rename = "added")]
     Added,
-    #[serde(rename = "active")]
-    Active,
+    #[serde(rename = "waiting")]
+    Waiting,
     #[serde(rename = "downloading")]
     Downloading,
     #[serde(rename = "stopped")]
@@ -67,6 +67,53 @@ async fn retrieve_users(
             ));
         }
     };
+}
+
+#[get("/users/state/<state>")]
+async fn retrieve_stateful_users(
+    db: Connection<StreamersDB>,
+    state: &str,
+) -> Result<Json<Vec<Streamer>>, rocket::response::status::Custom<String>> {
+    match state {
+        "waiting" => (),
+        "downloading" => (),
+        "stopped" => (),
+        "error" => (),
+        _ => {
+            println!("Invalid State Passed: {}", state);
+            let error_msg = format!("{{\"invalid_state\": \"{}\"}}", state);
+            return Err(rocket::response::status::Custom(
+                Status::BadRequest,
+                error_msg,
+            ));
+        }
+    };
+
+    let waiting_user_filter: bson::Document = doc! {
+        "profile_status": state
+    };
+    let streamer_cursor = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .find(waiting_user_filter, None)
+        .await;
+    match streamer_cursor {
+        Ok(cursor) => {
+            if let Ok(streamers) = cursor.try_collect().await {
+                return Ok(Json(streamers));
+            }
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
+    };
+    return Err(rocket::response::status::Custom(
+        Status::InternalServerError,
+        "Woah".to_string(),
+    ));
 }
 
 #[get("/users/<user>")]
@@ -141,7 +188,7 @@ async fn add_user(
     let new_user = Streamer {
         profile_url: format!("https://chaturbate.com/{}", user),
         profile_name: String::from(user),
-        profile_status: StreamerState::Active,
+        profile_status: StreamerState::Waiting,
         download_size_mb: 0,
     };
     if let Ok(_res) = (&*db)
@@ -150,7 +197,7 @@ async fn add_user(
         .insert_one(&new_user, None)
         .await
     {
-        Ok(Json(StreamerState::Active))
+        Ok(Json(StreamerState::Waiting))
     } else {
         let err_string = format!("Could Not Add User {}", user);
         Err(rocket::response::status::Custom(
@@ -273,6 +320,7 @@ async fn main() -> Result<(), rocket::Error> {
             "/",
             routes![
                 retrieve_users,
+                retrieve_stateful_users,
                 retrieve_user,
                 add_user,
                 delete_user,
