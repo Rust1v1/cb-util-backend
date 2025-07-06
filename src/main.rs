@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate rocket;
+use futures::StreamExt;
 use futures::stream::TryStreamExt;
 use mongodb::bson::doc;
 use rocket::http::Status;
@@ -312,6 +313,58 @@ async fn mutate_user(
     };
 }
 
+#[post("/users", data = "<msg>")]
+async fn mutate_all_users(
+    db: Connection<StreamersDB>,
+    msg: Json<StreamerUpdateMessage>,
+) -> Result<Json<String>, rocket::response::status::Custom<String>> {
+    let update_state = msg.into_inner();
+    let streamer_cursor = (&*db)
+        .database("cbutil")
+        .collection::<Streamer>("streamers")
+        .find(None, None)
+        .await;
+    match streamer_cursor {
+        Ok(mut cursor) => {
+            while let Some(streamer_doc) = cursor.next().await {
+                let streamer_profile = streamer_doc.expect("invalid user doc retrieved from mongo");
+                let updated_user = Streamer {
+                    profile_url: streamer_profile.profile_url.clone(),
+                    profile_name: streamer_profile.profile_name.clone(),
+                    profile_status: update_state.profile_status.clone(),
+                    download_size_mb: 0,
+                };
+                if let Err(update_err) = (&*db)
+                    .database("cbutil")
+                    .collection::<Streamer>("streamers")
+                    .replace_one(
+                        doc! {"profile_name": streamer_profile.profile_name},
+                        updated_user,
+                        None,
+                    )
+                    .await
+                {
+                    return Err(rocket::response::status::Custom(
+                        Status::InternalServerError,
+                        update_err.to_string(),
+                    ));
+                }
+            }
+            println!(
+                "updated all user state to {:?}",
+                update_state.profile_status
+            );
+            return Ok(Json(String::from("successfully updated all users' state")));
+        }
+        Err(e) => {
+            return Err(rocket::response::status::Custom(
+                Status::InternalServerError,
+                e.to_string(),
+            ));
+        }
+    };
+}
+
 #[rocket::main]
 async fn main() -> Result<(), rocket::Error> {
     let _rocket = rocket::build()
@@ -324,7 +377,8 @@ async fn main() -> Result<(), rocket::Error> {
                 retrieve_user,
                 add_user,
                 delete_user,
-                mutate_user
+                mutate_user,
+                mutate_all_users,
             ],
         )
         .launch()
