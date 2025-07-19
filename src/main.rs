@@ -13,7 +13,7 @@ struct Streamer {
     profile_url: String,
     profile_name: String,
     profile_status: StreamerState,
-    download_size_mb: u32,
+    download_size_mb: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -35,6 +35,7 @@ enum StreamerState {
 #[serde(crate = "rocket::serde")]
 struct StreamerUpdateMessage {
     profile_status: StreamerState,
+    download_size_mb: u64,
 }
 
 #[derive(Database)]
@@ -266,7 +267,7 @@ async fn mutate_user(
         profile_url: format!("https://chaturbate.com/{}", user),
         profile_name: String::from(user),
         profile_status: update.profile_status.clone(),
-        download_size_mb: 0,
+        download_size_mb: update.download_size_mb,
     };
     match (&*db)
         .database("cbutil")
