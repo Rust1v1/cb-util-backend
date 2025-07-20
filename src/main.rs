@@ -27,6 +27,8 @@ enum StreamerState {
     Downloading,
     #[serde(rename = "stopped")]
     Stopped,
+    #[serde(rename = "stopping")]
+    Stopping,
     #[serde(rename = "error")]
     Error(u32),
 }
@@ -80,6 +82,7 @@ async fn retrieve_stateful_users(
         "waiting" => (),
         "downloading" => (),
         "stopped" => (),
+        "stopping" => (),
         "error" => (),
         _ => {
             println!("Invalid State Passed: {}", state);
