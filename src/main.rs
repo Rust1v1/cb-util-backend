@@ -3,9 +3,11 @@ extern crate rocket;
 use futures::StreamExt;
 use futures::stream::TryStreamExt;
 use mongodb::bson::doc;
+use rocket::State;
 use rocket::http::Status;
 use rocket::serde::{Deserialize, Serialize, json::Json};
 use rocket_db_pools::{Connection, Database, mongodb};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
@@ -35,6 +37,12 @@ enum StreamerState {
 
 #[derive(Deserialize, Serialize)]
 #[serde(crate = "rocket::serde")]
+struct ToggleStatusing {
+    statusing: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(crate = "rocket::serde")]
 struct StreamerUpdateMessage {
     profile_status: StreamerState,
     download_size_mb: u64,
@@ -48,7 +56,7 @@ struct StreamersDB(mongodb::Client);
 async fn retrieve_users(
     db: Connection<StreamersDB>,
 ) -> Result<Json<Vec<Streamer>>, rocket::response::status::Custom<String>> {
-    let streamer_cursor = (&*db)
+    let streamer_cursor = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .find(None, None)
@@ -97,7 +105,7 @@ async fn retrieve_stateful_users(
     let waiting_user_filter: bson::Document = doc! {
         "profile_status": state
     };
-    let streamer_cursor = (&*db)
+    let streamer_cursor = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .find(waiting_user_filter, None)
@@ -115,10 +123,10 @@ async fn retrieve_stateful_users(
             ));
         }
     };
-    return Err(rocket::response::status::Custom(
+    Err(rocket::response::status::Custom(
         Status::InternalServerError,
         "Woah".to_string(),
-    ));
+    ))
 }
 
 #[get("/users/<user>")]
@@ -126,7 +134,7 @@ async fn retrieve_user(
     db: Connection<StreamersDB>,
     user: &str,
 ) -> Result<Json<Streamer>, rocket::response::status::Custom<String>> {
-    let user_option = (&*db)
+    let user_option = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .find_one(
@@ -158,12 +166,19 @@ async fn retrieve_user(
     };
 }
 
+#[get("/statusing")]
+async fn is_statusing(
+    statusing_bool: &State<AtomicBool>,
+) -> Result<Json<bool>, rocket::response::status::Unauthorized<String>> {
+    Ok(Json(statusing_bool.load(Ordering::Relaxed)))
+}
+
 #[put("/users/<user>")]
 async fn add_user(
     db: Connection<StreamersDB>,
     user: &str,
 ) -> Result<Json<StreamerState>, rocket::response::status::Custom<String>> {
-    if let Ok(user_count) = (&*db)
+    if let Ok(user_count) = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .count_documents(
@@ -196,7 +211,7 @@ async fn add_user(
         profile_status: StreamerState::Waiting,
         download_size_mb: 0,
     };
-    if let Ok(_res) = (&*db)
+    if let Ok(_res) = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .insert_one(&new_user, None)
@@ -217,7 +232,7 @@ async fn delete_user(
     db: Connection<StreamersDB>,
     user: &str,
 ) -> Result<Json<String>, rocket::response::status::Custom<String>> {
-    match (&*db)
+    match (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .count_documents(
@@ -235,7 +250,7 @@ async fn delete_user(
                     format!("User {} does not exist to be deleted.", user),
                 ));
             }
-            if let Err(delete_err) = (&*db)
+            if let Err(delete_err) = (*db)
                 .database("cbutil")
                 .collection::<Streamer>("streamers")
                 .delete_one(doc! {"profile_name": user}, None)
@@ -259,6 +274,18 @@ async fn delete_user(
     };
 }
 
+#[post("/statusing", data = "<msg>")]
+async fn toggle_statusing(
+    statusing_bool: &State<AtomicBool>,
+    msg: Json<ToggleStatusing>,
+) -> Result<Json<String>, rocket::response::status::Unauthorized<String>> {
+    let update_bool: bool = msg.into_inner().statusing;
+    statusing_bool.store(update_bool, Ordering::Relaxed);
+    Ok(Json(format!(
+        "Updated internal statusing state to {update_bool}"
+    )))
+}
+
 #[post("/users/<user>", data = "<msg>")]
 async fn mutate_user(
     db: Connection<StreamersDB>,
@@ -272,7 +299,7 @@ async fn mutate_user(
         profile_status: update.profile_status.clone(),
         download_size_mb: update.download_size_mb,
     };
-    match (&*db)
+    match (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .count_documents(
@@ -290,7 +317,7 @@ async fn mutate_user(
                     format!("User {} does not exist to be updated.", user),
                 ));
             }
-            if let Err(update_err) = (&*db)
+            if let Err(update_err) = (*db)
                 .database("cbutil")
                 .collection::<Streamer>("streamers")
                 .replace_one(doc! {"profile_name": user}, updated_user, None)
@@ -323,7 +350,7 @@ async fn mutate_all_users(
     msg: Json<StreamerUpdateMessage>,
 ) -> Result<Json<String>, rocket::response::status::Custom<String>> {
     let update_state = msg.into_inner();
-    let streamer_cursor = (&*db)
+    let streamer_cursor = (*db)
         .database("cbutil")
         .collection::<Streamer>("streamers")
         .find(None, None)
@@ -338,7 +365,7 @@ async fn mutate_all_users(
                     profile_status: update_state.profile_status.clone(),
                     download_size_mb: 0,
                 };
-                if let Err(update_err) = (&*db)
+                if let Err(update_err) = (*db)
                     .database("cbutil")
                     .collection::<Streamer>("streamers")
                     .replace_one(
@@ -373,14 +400,17 @@ async fn mutate_all_users(
 async fn main() -> Result<(), rocket::Error> {
     let _rocket = rocket::build()
         .attach(StreamersDB::init())
+        .manage(AtomicBool::new(true))
         .mount(
             "/",
             routes![
                 retrieve_users,
                 retrieve_stateful_users,
                 retrieve_user,
+                is_statusing,
                 add_user,
                 delete_user,
+                toggle_statusing,
                 mutate_user,
                 mutate_all_users,
             ],
