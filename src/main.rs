@@ -32,7 +32,7 @@ enum StreamerState {
     #[serde(rename = "stopping")]
     Stopping,
     #[serde(rename = "error")]
-    Error(u32),
+    Error(u16),
 }
 
 #[derive(Deserialize, Serialize)]

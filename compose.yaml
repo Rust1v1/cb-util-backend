@@ -1,0 +1,69 @@
+# Use a modern version of the docker-compose file format
+version: '3.8'
+
+# Define the services (containers) that make up your application
+services:
+
+  # Service for your Rust application
+  rust-app:
+    # Use the image you will build and push from your GitHub Actions workflow.
+    # Replace the placeholder with your actual image name.
+    # Example: ghcr.io/your-github-user/your-app-name:latest
+    # image: ghcr.io/${{ github.actor }}/${{ github.repository }}:latest
+    image: localhost/rust1v1/cb-util-backend:latest
+
+    networks:
+      - backend
+
+    # Expose the port your Rust web server listens on.
+    # The format is "HOST_PORT:CONTAINER_PORT".
+    # This maps port 8080 from the container to port 8080 on your host machine.
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - "/home/khufu/Code/cb-util-backend/Rocket.toml:/app/Rocket.toml"
+
+    # Set environment variables for the application to connect to the database.
+    # It's crucial to use environment variables for credentials and not hardcode them.
+    environment:
+      # The host for the database is the name of the service in the docker-compose file.
+      DATABASE_URL: mongodb://rootuser:rootpass@mongo:27017
+      # You can add other environment variables here.
+      # For example, to set the application's bind address
+      # RUST_APP_BIND_ADDRESS: "0.0.0.0:8080"
+
+    # This ensures that the 'mongo' service is started before the 'rust-app' service.
+    # Note: This does not guarantee that the database is fully initialized and ready to accept connections.
+    # You might need to implement retry logic in your application to handle this.
+    depends_on:
+      - mongo
+
+  # Service for the MongoDB database
+  mongo:
+    # Use the official MongoDB image
+    image: mongo:8.0
+
+    networks:
+      - backend
+
+    # Store the MongoDB data in a persistent volume.
+    # This prevents your data from being lost when the container is stopped or removed.
+    volumes:
+      - mongodb_data:/data/db
+
+    # Set environment variables to initialize the root user and password for MongoDB.
+    # These credentials should match the ones in your 'rust-app' service's DATABASE_URL.
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: rootuser
+      MONGO_INITDB_ROOT_PASSWORD: rootpass
+
+# Define the volumes used by the services.
+volumes:
+  # The 'mongodb_data' volume will be managed by Docker.
+  # Its data will persist even if the 'mongo' container is recreated.
+  mongodb_data:
+
+networks:
+  backend:
+    driver: bridge
